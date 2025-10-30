@@ -37,6 +37,6 @@ class GCN(nn.Module):
 
         # if graph-level prediction, pool over nodes
         if self.graph_lev:
-            x = global_mean_pool(x, batch=None)
+            x = global_mean_pool(x, batch=batch)
 
         return x
