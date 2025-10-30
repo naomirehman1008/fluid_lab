@@ -95,16 +95,16 @@ class GridRepresentations:
         # self.x_1 = self.edge_velocities() # edge-level features (np.array)
         # self.x_2 = self.face_circulations() # face-level features (np.array)
 
-    def _positions(self):
-        '''
-        Given an MxNxd NumPy array, returns an MxNx2 matrix giving the (i,j)
-        coordinates of each grid point. The last axis of the input (velocity etc.)
-        is ignored.
-        '''
-        M, N, _ = self.velo_grid.shape
-        i_coords, j_coords = np.meshgrid(np.arange(M), np.arange(N), indexing='ij')
-        positions = np.stack((i_coords, j_coords), axis=-1)  # shape (M, N, 2)
-        return positions
+def positions(grid):
+    '''
+    Given an MxNxd NumPy array, returns an MxNx2 matrix giving the (i,j)
+    coordinates of each grid point. The last axis of the input (velocity etc.)
+    is ignored.
+    '''
+    M, N, _ = grid.velo_grid.shape
+    i_coords, j_coords = np.meshgrid(np.arange(M), np.arange(N), indexing='ij')
+    positions = np.stack((i_coords, j_coords), axis=-1)  # shape (M, N, 2)
+    return positions
     
     def node_energy_features(self):
         '''
@@ -118,74 +118,72 @@ class GridRepresentations:
             energies.append(np.dot(v, v))  # squared velocity magnitude
         return energies
 
+def edge_velocities(G, grid, node_to_coords, coord_to_nodes):
+    '''
+    Computes edge-level features according to the indexing imposed by self.K,
+    using the function _edge_velocity.
+    Returns an array of shape (num_edges, 1) with each edge’s velocity feature.
+    '''
+    edge_features = []
+    for u, v in tqdm(grid.edges()):
+        edge_features.append(_edge_velocity(u, v))
+    return np.array(edge_features)
 
+def _edge_velocity(G, grid, node_to_coords, coord_to_nodes, u, v):
+    '''
+    Given nodes u,v, compute an edge-level velocity feature by projecting
+    the node velocities onto the unit vector along the edge, then averaging.
 
-    def edge_velocities(self):
-        '''
-        Computes edge-level features according to the indexing imposed by self.K,
-        using the function _edge_velocity.
-        Returns an array of shape (num_edges, 1) with each edge’s velocity feature.
-        '''
-        edge_features = []
-        for u, v in tqdm(self.G.edges()):
-            edge_features.append(self._edge_velocity(u, v))
-        return np.array(edge_features)
+    Should check that (u,v) is a 1-simplex in self.K and raise an assertion if not.
+    '''
+    assert (u, v) in G.edges() or (v, u) in G.edges(), \
+        f"({u},{v}) is not a valid edge in the graph."
 
-    def _edge_velocity(self, u, v):
-        '''
-        Given nodes u,v, compute an edge-level velocity feature by projecting
-        the node velocities onto the unit vector along the edge, then averaging.
+    # Coordinates of the nodes
+    i1, j1 = node_to_coords(u)
+    i2, j2 = node_to_coords(v)
 
-        Should check that (u,v) is a 1-simplex in self.K and raise an assertion if not.
-        '''
-        assert (u, v) in self.G.edges() or (v, u) in self.G.edges(), \
-            f"({u},{v}) is not a valid edge in the graph."
+    # Direction vector (from u to v)
+    direction = np.array([i2 - i1, j2 - j1], dtype=float)
+    direction /= np.linalg.norm(direction)  # unit vector
 
-        # Coordinates of the nodes
-        i1, j1 = self.node_to_coords(u)
-        i2, j2 = self.node_to_coords(v)
+    # Velocities at nodes
+    vel_u = grid[i1, j1][:2]
+    vel_v = grid[i2, j2][:2]
 
-        # Direction vector (from u to v)
-        direction = np.array([i2 - i1, j2 - j1], dtype=float)
-        direction /= np.linalg.norm(direction)  # unit vector
+    # Project both velocities onto direction and average
+    proj_u = np.dot(vel_u, direction)
+    proj_v = np.dot(vel_v, direction)
+    return 0.5 * (proj_u + proj_v)
 
-        # Velocities at nodes
-        vel_u = self.velo_grid[i1, j1][:2]
-        vel_v = self.velo_grid[i2, j2][:2]
+def face_circulations(K):
+    '''
+    Computes 2-simplex-level features (face circulations) according to
+    the indexing in self.K, using _face_circulation.
+    Returns an array of shape (num_faces, 1).
+    '''
+    face_features = []
+    for simplex in tqdm([simplex for simplex in K.simplices if len(simplex)==3]):  # 2-simplices (triangles)
+        x1, x2, x3 = simplex
+        face_features.append(_face_circulation(x1, x2, x3))
+    return np.array(face_features)
 
-        # Project both velocities onto direction and average
-        proj_u = np.dot(vel_u, direction)
-        proj_v = np.dot(vel_v, direction)
-        return 0.5 * (proj_u + proj_v)
+def _face_circulation(x_1, x_2, x_3):
+    '''
+    Given nodes x_1, x_2, x_3 forming a 2-simplex (triangle),
+    computes a scalar circulation feature around the face.
+    Should check that (x_1, x_2, x_3) is indeed a 2-simplex in self.K.
+    '''
+    # simplex = {x_1, x_2, x_3}
+    # assert simplex in [set(simplex) for simplex in self.K.simplices if len(simplex)==3], \
+    #     f"({x_1},{x_2},{x_3}) is not a 2-simplex in the complex."
 
-    def face_circulations(self):
-        '''
-        Computes 2-simplex-level features (face circulations) according to
-        the indexing in self.K, using _face_circulation.
-        Returns an array of shape (num_faces, 1).
-        '''
-        face_features = []
-        for simplex in tqdm([simplex for simplex in self.K.simplices if len(simplex)==3]):  # 2-simplices (triangles)
-            x1, x2, x3 = simplex
-            face_features.append(self._face_circulation(x1, x2, x3))
-        return np.array(face_features)
-
-    def _face_circulation(self, x_1, x_2, x_3):
-        '''
-        Given nodes x_1, x_2, x_3 forming a 2-simplex (triangle),
-        computes a scalar circulation feature around the face.
-        Should check that (x_1, x_2, x_3) is indeed a 2-simplex in self.K.
-        '''
-        # simplex = {x_1, x_2, x_3}
-        # assert simplex in [set(simplex) for simplex in self.K.simplices if len(simplex)==3], \
-        #     f"({x_1},{x_2},{x_3}) is not a 2-simplex in the complex."
-
-        # Get edge circulation around triangle (sum of edge projections)
-        edges = [(x_1, x_2), (x_2, x_3), (x_3, x_1)]
-        circ = 0.0
-        for u, v in edges:
-            circ += self._edge_velocity(u, v)
-        return circ
+    # Get edge circulation around triangle (sum of edge projections)
+    edges = [(x_1, x_2), (x_2, x_3), (x_3, x_1)]
+    circ = 0.0
+    for u, v in edges:
+        circ += _edge_velocity(u, v)
+    return circ
     
 def visualize_energy(graph, grid, node_to_coords, ax=None, node_size=30, edge_width=1.5):
     pos = {n: node_to_coords(n)[::-1] for n in graph.nodes()}  # (x, y) layout
