@@ -1,12 +1,12 @@
 import networkx as nx
 import numpy as np
-from toponetx.transform import graph_to_clique_complex
+from toponetx import SimplicialComplex
 import matplotlib.pyplot as plt
 
 from tqdm.auto import tqdm
 
 
-def _grid_to_graph(grid):
+def grid_to_graph(grid):
     '''
     Input: a MxNxd NumPy array representing a fluid field where each coordinate has d attributes (velocity, pressure, etc.)
     Returns: 
@@ -39,8 +39,45 @@ def _grid_to_graph(grid):
     return G, coords_to_node, node_to_coords
     
 
-def _graph_to_complex(G):
-    return graph_to_clique_complex(G)
+def _graph_to_complex(G, M=None, N=None):
+    """
+    Construct the simplicial complex directly from a grid graph G
+    built by grid_to_graph, without calling graph_to_clique_complex.
+    """
+    if M is None or N is None:
+        # infer grid shape from number of nodes (works since node ids are 0..M*N-1)
+        num_nodes = G.number_of_nodes()
+        M = int(np.sqrt(num_nodes))
+        N = num_nodes // M
+
+    SC = SimplicialComplex()
+
+    # Add 0-simplices (nodes)
+    for v in G.nodes:
+        SC.add_simplex([v])
+
+    # Add 1-simplices (edges)
+    for u, v in G.edges:
+        SC.add_simplex([u, v])
+
+    # Add 2-simplices (triangles)
+    # We know each square forms one triangle (i,j)-(i+1,j)-(i,j+1)
+    # and one diagonal (i+1,j+1) completes the second triangle.
+    def coords_to_node(i, j):
+        return i * N + j
+
+    for i in range(M - 1):
+        for j in range(N - 1):
+            v00 = coords_to_node(i, j)
+            v10 = coords_to_node(i + 1, j)
+            v01 = coords_to_node(i, j + 1)
+            v11 = coords_to_node(i + 1, j + 1)
+
+            # Two triangles per cell (consistent with your edge pattern)
+            SC.add_simplex([v00, v10, v11])
+            SC.add_simplex([v00, v01, v11])
+
+    return SC
 
 class GridRepresentations:
     '''
@@ -51,12 +88,12 @@ class GridRepresentations:
     '''
     def __init__(self, grid):
         self.velo_grid = grid #nxmxd grid of velocities at each point
-        self.G, self.coords_to_node, self.node_to_coords = _grid_to_graph(self.velo_grid) # NetworkX graph representation
+        self.G, self.coords_to_node, self.node_to_coords = grid_to_graph(self.velo_grid) # NetworkX graph representation
         # And also functions mapping coordinates to node IDs and back
-        self.K = _graph_to_complex(self.G) # TopoNetX simplicial complex representation
-        self.x_0 = self._positions() # node-level features (np.array)
-        self.x_1 = self.edge_velocities() # edge-level features (np.array)
-        self.x_2 = self.face_circulations() # face-level features (np.array)
+        # self.K = _graph_to_complex(self.G) # TopoNetX simplicial complex representation
+        # self.x_0 = self._positions() # node-level features (np.array)
+        # self.x_1 = self.edge_velocities() # edge-level features (np.array)
+        # self.x_2 = self.face_circulations() # face-level features (np.array)
 
     def _positions(self):
         '''
@@ -64,7 +101,6 @@ class GridRepresentations:
         coordinates of each grid point. The last axis of the input (velocity etc.)
         is ignored.
         '''
-        print(f'Computing node-level features!')
         M, N, _ = self.velo_grid.shape
         i_coords, j_coords = np.meshgrid(np.arange(M), np.arange(N), indexing='ij')
         positions = np.stack((i_coords, j_coords), axis=-1)  # shape (M, N, 2)
@@ -90,7 +126,6 @@ class GridRepresentations:
         using the function _edge_velocity.
         Returns an array of shape (num_edges, 1) with each edge’s velocity feature.
         '''
-        print(f'Computing edge-level features!')
         edge_features = []
         for u, v in tqdm(self.G.edges()):
             edge_features.append(self._edge_velocity(u, v))
@@ -129,7 +164,6 @@ class GridRepresentations:
         the indexing in self.K, using _face_circulation.
         Returns an array of shape (num_faces, 1).
         '''
-        print('Computing 2-simplex-level features')
         face_features = []
         for simplex in tqdm([simplex for simplex in self.K.simplices if len(simplex)==3]):  # 2-simplices (triangles)
             x1, x2, x3 = simplex
@@ -153,32 +187,31 @@ class GridRepresentations:
             circ += self._edge_velocity(u, v)
         return circ
     
-    def visualize_energy(self, ax=None, node_size=30, edge_width=1.5):
-        energies = self.node_energy_features()
-        pos = {n: self.node_to_coords(n)[::-1] for n in self.G.nodes()}  # (x, y) layout
+def visualize_energy(graph, grid, node_to_coords, ax=None, node_size=30, edge_width=1.5):
+    pos = {n: node_to_coords(n)[::-1] for n in graph.nodes()}  # (x, y) layout
 
-        n_nodes = len(self.G.nodes())
-        fig_size = max(4, np.sqrt(n_nodes) / 6)
+    n_nodes = len(graph.nodes())
+    fig_size = max(4, np.sqrt(n_nodes) / 6)
 
-        # Create axis if not provided
-        created_fig = False
-        if ax is None:
-            fig, ax = plt.subplots(figsize=(fig_size, fig_size))
-            created_fig = True
+    # Create axis if not provided
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(fig_size, fig_size))
+        created_fig = True
 
-        nx.draw(
-            self.G, pos,
-            node_size=node_size,
-            node_color=energies,
-            edge_color="#444444",
-            width=edge_width,
-            cmap='viridis',
-            ax=ax
-        )
-        ax.set_title("Graph colored by squared total velocity")
-        ax.set_aspect("equal")
+    nx.draw(
+        graph, pos,
+        node_size=node_size,
+        node_color=grid.flatten(),
+        edge_color="#444444",
+        width=edge_width,
+        cmap='viridis',
+        ax=ax
+    )
+    ax.set_title("Graph colored by squared total velocity")
+    ax.set_aspect("equal")
 
-        # Only apply tight layout and show if we created the figure
-        if created_fig:
-            plt.tight_layout()
-            plt.show()
+    # Only apply tight layout and show if we created the figure
+    if created_fig:
+        plt.tight_layout()
+        plt.show()
